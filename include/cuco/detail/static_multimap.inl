@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, NVIDIA CORPORATION.
+ * Copyright (c) 2021, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,50 +16,27 @@
 
 namespace cuco {
 
-/**---------------------------------------------------------------------------*
- * @brief Enumeration of the possible results of attempting to insert into
- *a hash bucket
- *---------------------------------------------------------------------------**/
-enum class insert_result {
-  CONTINUE,  ///< Insert did not succeed, continue trying to insert
-  SUCCESS,   ///< New pair inserted successfully
-  DUPLICATE  ///< Insert did not succeed, key is already present
-};
-
 template <typename Key, typename Value, cuda::thread_scope Scope, typename Allocator>
-static_map<Key, Value, Scope, Allocator>::static_map(std::size_t capacity,
-                                                     Key empty_key_sentinel,
-                                                     Value empty_value_sentinel,
-                                                     Allocator const& alloc)
-  : capacity_{capacity},
-    empty_key_sentinel_{empty_key_sentinel},
-    empty_value_sentinel_{empty_value_sentinel},
-    slot_allocator_{alloc}
+static_multimap<Key, Value, Scope, Allocator>::static_multimap(std::size_t capacity,
+                                                               Key empty_key_sentinel,
+                                                               Value empty_value_sentinel,
+                                                               Allocator const& alloc)
+  : static_map<Key, Value, Scope, Allocator>{
+      capacity, empty_key_sentinel, empty_value_sentinel, alloc}
 {
-  slots_ = std::allocator_traits<slot_allocator_type>::allocate(slot_allocator_, capacity);
-
-  auto constexpr block_size = 256;
-  auto constexpr stride     = 4;
-  auto const grid_size      = (capacity + stride * block_size - 1) / (stride * block_size);
-  detail::initialize<atomic_key_type, atomic_mapped_type>
-    <<<grid_size, block_size>>>(slots_, empty_key_sentinel, empty_value_sentinel, capacity);
-
-  CUCO_CUDA_TRY(cudaMallocManaged(&num_successes_, sizeof(atomic_ctr_type)));
 }
 
 template <typename Key, typename Value, cuda::thread_scope Scope, typename Allocator>
-static_map<Key, Value, Scope, Allocator>::~static_map()
+static_multimap<Key, Value, Scope, Allocator>::~static_multimap()
 {
-  std::allocator_traits<slot_allocator_type>::deallocate(slot_allocator_, slots_, capacity_);
-  CUCO_CUDA_TRY(cudaFree(num_successes_));
 }
 
 template <typename Key, typename Value, cuda::thread_scope Scope, typename Allocator>
 template <typename InputIt, typename Hash, typename KeyEqual>
-void static_map<Key, Value, Scope, Allocator>::insert(InputIt first,
-                                                      InputIt last,
-                                                      Hash hash,
-                                                      KeyEqual key_equal)
+void static_multimap<Key, Value, Scope, Allocator>::insert(InputIt first,
+                                                           InputIt last,
+                                                           Hash hash,
+                                                           KeyEqual key_equal)
 {
   auto num_keys         = std::distance(first, last);
   auto const block_size = 128;
@@ -73,13 +50,14 @@ void static_map<Key, Value, Scope, Allocator>::insert(InputIt first,
   CUCO_CUDA_TRY(cudaGetDevice(&device_id));
   CUCO_CUDA_TRY(cudaMemPrefetchAsync(num_successes_, sizeof(atomic_ctr_type), device_id));
 
-  detail::map::insert<block_size, tile_size>
+  detail::multimap::insert<block_size, tile_size>
     <<<grid_size, block_size>>>(first, first + num_keys, num_successes_, view, hash, key_equal);
   CUCO_CUDA_TRY(cudaDeviceSynchronize());
 
   size_ += num_successes_->load(cuda::std::memory_order_relaxed);
 }
 
+/*
 template <typename Key, typename Value, cuda::thread_scope Scope, typename Allocator>
 template <typename InputIt, typename OutputIt, typename Hash, typename KeyEqual>
 void static_map<Key, Value, Scope, Allocator>::find(
@@ -92,7 +70,7 @@ void static_map<Key, Value, Scope, Allocator>::find(
   auto const grid_size  = (tile_size * num_keys + stride * block_size - 1) / (stride * block_size);
   auto view             = get_device_view();
 
-  detail::map::find<block_size, tile_size, Value>
+  detail::find<block_size, tile_size, Value>
     <<<grid_size, block_size>>>(first, last, output_begin, view, hash, key_equal);
   CUCO_CUDA_TRY(cudaDeviceSynchronize());
 }
@@ -109,7 +87,7 @@ void static_map<Key, Value, Scope, Allocator>::contains(
   auto const grid_size  = (tile_size * num_keys + stride * block_size - 1) / (stride * block_size);
   auto view             = get_device_view();
 
-  detail::map::contains<block_size, tile_size>
+  detail::contains<block_size, tile_size>
     <<<grid_size, block_size>>>(first, last, output_begin, view, hash, key_equal);
   CUCO_CUDA_TRY(cudaDeviceSynchronize());
 }
@@ -394,4 +372,5 @@ __device__ bool static_map<Key, Value, Scope, Allocator>::device_view::contains(
     current_slot = next_slot(g, current_slot);
   }
 }
+*/
 }  // namespace cuco
