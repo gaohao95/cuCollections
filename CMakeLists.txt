@@ -35,7 +35,7 @@ endif()
 
 # Note: CUDA 10.2 debian packages are broken for cuda/std/atomic header as it is located in
 # cuda/std/std/atomic
-find_package(CUDAToolkit 10.2 REQUIRED)
+find_package(CUDAToolkit 11.0 REQUIRED)
 
 include(cmake/Modules/CPM.cmake)
 
@@ -66,7 +66,7 @@ target_include_directories(cuco INTERFACE
                            "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
                            $<INSTALL_INTERFACE:include>)
 target_link_libraries(cuco INTERFACE libcudacxx CUDA::cudart Thrust CUB::CUB)
-target_compile_features(cuco INTERFACE cxx_std_14 cuda_std_14)
+target_compile_features(cuco INTERFACE cxx_std_17 cuda_std_17)
 
 
 # Build options
