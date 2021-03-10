@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#pragma once
+
 #include <thrust/pair.h>
 
 namespace cuco {
@@ -65,6 +67,9 @@ struct alignas(detail::pair_alignment<First, Second>()) pair {
   pair() = default;
   __host__ __device__ constexpr pair(thrust::pair<First, Second> const& p) noexcept
     : first{p.first}, second{p.second}
+  {
+  }
+  __host__ __device__ constexpr pair(First const& f, Second const& s) noexcept : first{f}, second{s}
   {
   }
 };
