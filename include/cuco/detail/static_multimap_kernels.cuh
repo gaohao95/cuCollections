@@ -401,19 +401,22 @@ __global__ void find_all(InputIt first,
   auto tid     = blockDim.x * blockIdx.x + threadIdx.x;
   auto key_idx = tid;
 
+  constexpr size_t step = 1;
+
   while (first + key_idx < last) {
     auto key     = *(first + key_idx);
     auto found   = view.find_all(key, hash, key_equal);
     size_t count = 0;
 
     while (found != view.end()) {
-      size_t index            = (*num_items)++;
-      *(output_begin + index) = cuco::make_pair<Key, Value>(key, (*found).second);
+      size_t index = num_items->fetch_add(step, cuda::std::memory_order_relaxed);
+      *(output_begin + index) =
+        cuco::make_pair<Key, Value>(key, found->second.load(cuda::std::memory_order_relaxed));
       ++found;
       ++count;
     }
     if (count == 0) {
-      size_t index            = (*num_items)++;
+      size_t index            = num_items->fetch_add(step, cuda::std::memory_order_relaxed);
       *(output_begin + index) = cuco::make_pair<Key, Value>(key, view.get_empty_value_sentinel());
     }
     key_idx += gridDim.x * blockDim.x;
@@ -473,6 +476,8 @@ __global__ void find_all(InputIt first,
   auto tid     = blockDim.x * blockIdx.x + threadIdx.x;
   auto key_idx = tid / tile_size;
 
+  constexpr size_t step = 1;
+
   while (first + key_idx < last) {
     auto key   = *(first + key_idx);
     auto found = view.find_all(tile, key, hash, key_equal);
@@ -480,13 +485,14 @@ __global__ void find_all(InputIt first,
     if (tile.thread_rank() == 0) {
       size_t count = 0;
       while (found != view.end()) {
-        size_t index            = (*num_items)++;
-        *(output_begin + index) = cuco::make_pair<Key, Value>(key, (*found).second);
+        size_t index = num_items->fetch_add(step, cuda::std::memory_order_relaxed);
+        *(output_begin + index) =
+          cuco::make_pair<Key, Value>(key, found->second.load(cuda::std::memory_order_relaxed));
         ++found;
         ++count;
       }
       if (count == 0) {
-        size_t index            = (*num_items)++;
+        size_t index            = num_items->fetch_add(step, cuda::std::memory_order_relaxed);
         *(output_begin + index) = cuco::make_pair<Key, Value>(key, view.get_empty_value_sentinel());
       }
     }
@@ -537,7 +543,7 @@ __global__ void count(
   // compute number of successfully inserted elements for each block
   // and atomically add to the grand total
   std::size_t block_num_items = BlockReduce(temp_storage).Sum(thread_num_items);
-  if (threadIdx.x == 0) { *num_items += block_num_items; }
+  if (threadIdx.x == 0) { num_items->fetch_add(block_num_items, cuda::std::memory_order_relaxed); }
 }
 
 /**
@@ -587,7 +593,7 @@ __global__ void count(
   // compute number of successfully inserted elements for each block
   // and atomically add to the grand total
   std::size_t block_num_items = BlockReduce(temp_storage).Sum(thread_num_items);
-  if (threadIdx.x == 0) { *num_items += block_num_items; }
+  if (threadIdx.x == 0) { num_items->fetch_add(block_num_items, cuda::std::memory_order_relaxed); }
 }
 
 }  // namespace detail

@@ -652,12 +652,15 @@ class static_multimap {
     template <typename DataType>
     struct FancyIterator {
      public:
-      using data_type      = DataType;
-      using pointer_type   = DataType*;
-      using data_reference = DataType&;
+      using data_type                 = DataType;
+      using data_pointer_type         = DataType*;
+      using data_reference_type       = DataType&;
+      using const_data_reference_type = DataType const&;
 
      public:
-      __host__ __device__ FancyIterator(pointer_type current, Key key, device_view& view) noexcept
+      __host__ __device__ FancyIterator(data_pointer_type current,
+                                        Key key,
+                                        device_view& view) noexcept
         : current_{current},
           key_{key},
           begin_{view.begin_slot()},
@@ -666,7 +669,7 @@ class static_multimap {
       {
       }
 
-      __host__ __device__ FancyIterator(pointer_type current,
+      __host__ __device__ FancyIterator(data_pointer_type current,
                                         Key key,
                                         const device_view& view) noexcept
         : current_{current},
@@ -692,28 +695,31 @@ class static_multimap {
         return *this;
       }
 
-      __device__ pointer_type next_slot(pointer_type it) noexcept
+      __device__ data_pointer_type next_slot(data_pointer_type it) noexcept
       {
         return (++it < end_) ? it : begin_;
       }
-      __device__ pointer_type next_slot(pointer_type it) const noexcept
+      __device__ data_pointer_type next_slot(data_pointer_type it) const noexcept
       {
         return (++it < end_) ? it : begin_;
       }
 
-      __device__ bool operator==(const pointer_type& it) const { return (this->current_ == it); }
-      __device__ bool operator!=(const pointer_type& it) const { return this->current_ != it; }
+      __device__ bool operator==(const data_pointer_type& it) const
+      {
+        return (this->current_ == it);
+      }
+      __device__ bool operator!=(const data_pointer_type& it) const { return this->current_ != it; }
 
-      __device__ data_reference operator*() { return *current_; }
-      __device__ data_reference operator*() const { return *current_; }
-      __device__ pointer_type operator->() { return current_; }
-      __device__ pointer_type operator->() const { return current_; }
+      __device__ data_reference_type operator*() { return *current_; }
+      __device__ const_data_reference_type operator*() const { return *current_; }
+      __device__ data_pointer_type operator->() { return current_; }
+      __device__ data_pointer_type operator->() const { return current_; }
 
      private:
-      pointer_type current_;
+      data_pointer_type current_;
       Key key_;
-      pointer_type begin_;
-      pointer_type end_;
+      data_pointer_type begin_;
+      data_pointer_type end_;
       Key empty_key_sentinel_;
     };
     using fancy_iterator       = FancyIterator<pair_atomic_type>;
