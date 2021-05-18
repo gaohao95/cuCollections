@@ -21,7 +21,12 @@ CPMAddPackage(
   GIT_SHALLOW TRUE
 )
 
-set_target_properties(benchmark PROPERTIES CXX_STANDARD 17)
+CPMAddPackage(
+  NAME warpcore
+  GITHUB_REPOSITORY sleeepyjack/warpcore
+  GIT_TAG master
+  GIT_SHALLOW TRUE
+)
 
 ###################################################################################################
 # Auto-detect available GPU compute architectures
@@ -59,8 +64,7 @@ function(ConfigureNVBench BENCH_NAME BENCH_SRC)
                                         CUDA_ARCHITECTURES ${GPU_ARCHS}
                                         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/nvbenchmarks")
     target_include_directories(${BENCH_NAME} PRIVATE
-                                             "${CMAKE_CURRENT_SOURCE_DIR}")
-                                             #"${NVBench_SOURCE_DIR}")
+      "${CMAKE_CURRENT_SOURCE_DIR}" "${warpcore_SOURCE_DIR}/include")
     target_compile_options(${BENCH_NAME} PRIVATE --expt-extended-lambda --expt-relaxed-constexpr)
     target_link_libraries(${BENCH_NAME} PRIVATE
                                         nvbench::main
@@ -83,6 +87,10 @@ ConfigureBench(STATIC_MAP_BENCH "${STATIC_MAP_BENCH_SRC}")
 ###################################################################################################
 set(STATIC_MULTIMAP_BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/hash_table/static_multimap/static_multimap_bench.cu")
 ConfigureNVBench(STATIC_MULTIMAP_BENCH "${STATIC_MULTIMAP_BENCH_SRC}")
+
+###################################################################################################
+set(WARPCORE_BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/hash_table/static_multimap/warpcore_bench.cu")
+ConfigureNVBench(WARPCORE_BENCH "${WARPCORE_BENCH_SRC}")
 
 ###################################################################################################
 set(FIND_ALL_BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/hash_table/static_multimap/find_all_bench.cu")
