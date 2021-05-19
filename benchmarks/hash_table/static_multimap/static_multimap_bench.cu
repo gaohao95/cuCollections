@@ -269,12 +269,12 @@ std::enable_if_t<(sizeof(Key) != sizeof(Value)), void> nvbench_static_multimap_r
  * - CG size: 8
  */
 
-using key_type   = nvbench::type_list<nvbench::int32_t, nvbench::int64_t>;
-using value_type = nvbench::type_list<nvbench::int32_t, nvbench::int64_t>;
+using key_type   = nvbench::type_list<nvbench::int32_t>;
+using value_type = nvbench::type_list<nvbench::int32_t>;
 using d_type =
   nvbench::enum_type_list<dist_type::GAUSSIAN, dist_type::GEOMETRIC, dist_type::UNIFORM>;
 
-using multiplicity = nvbench::enum_type_list<1, 2, 4, 8, 16, 32, 64, 128, 256>;
+using multiplicity = nvbench::enum_type_list<1, 64>;
 
 NVBENCH_BENCH_TYPES(nvbench_static_multimap_insert,
                     NVBENCH_TYPE_AXES(key_type,
@@ -286,14 +286,6 @@ NVBENCH_BENCH_TYPES(nvbench_static_multimap_insert,
   .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
   .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
   .add_float64_axis("Occupancy", {0.8});
-
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_insert,
-                    NVBENCH_TYPE_AXES(key_type, value_type, d_type, nvbench::enum_type_list<8>))
-  .set_name("staic_multimap_insert_occupancy")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", nvbench::range(0.1, 0.9, 0.1));
 
 NVBENCH_BENCH_TYPES(nvbench_static_multimap_count,
                     NVBENCH_TYPE_AXES(key_type,
@@ -308,26 +300,6 @@ NVBENCH_BENCH_TYPES(nvbench_static_multimap_count,
   .add_float64_axis("Occupancy", {0.8})
   .add_float64_axis("MatchingRate", {0.5});
 
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_count,
-                    NVBENCH_TYPE_AXES(key_type, value_type, d_type, nvbench::enum_type_list<8>))
-  .set_name("staic_multimap_count_occupancy")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_timeout(100)                            // Custom timeout: 100 s. Default is 15 s.
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", nvbench::range(0.1, 0.9, 0.1))
-  .add_float64_axis("MatchingRate", {0.5});
-
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_count,
-                    NVBENCH_TYPE_AXES(key_type, value_type, d_type, nvbench::enum_type_list<8>))
-  .set_name("staic_multimap_count_matching_rate")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_timeout(100)                            // Custom timeout: 100 s. Default is 15 s.
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", {0.8})
-  .add_float64_axis("MatchingRate", {0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1});
-
 NVBENCH_BENCH_TYPES(nvbench_static_multimap_find_all,
                     NVBENCH_TYPE_AXES(key_type,
                                       value_type,
@@ -340,56 +312,3 @@ NVBENCH_BENCH_TYPES(nvbench_static_multimap_find_all,
   .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
   .add_float64_axis("Occupancy", {0.8})
   .add_float64_axis("MatchingRate", {0.5});
-
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_find_all,
-                    NVBENCH_TYPE_AXES(key_type, value_type, d_type, nvbench::enum_type_list<8>))
-  .set_name("staic_multimap_find_all_occupancy")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_timeout(100)                            // Custom timeout: 100 s. Default is 15 s.
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", nvbench::range(0.1, 0.9, 0.1))
-  .add_float64_axis("MatchingRate", {0.5});
-
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_find_all,
-                    NVBENCH_TYPE_AXES(key_type, value_type, d_type, nvbench::enum_type_list<8>))
-  .set_name("staic_multimap_find_all_matching_rate")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_timeout(100)                            // Custom timeout: 100 s. Default is 15 s.
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", {0.8})
-  .add_float64_axis("MatchingRate", {0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1});
-
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_retrieve,
-                    NVBENCH_TYPE_AXES(key_type,
-                                      value_type,
-                                      nvbench::enum_type_list<dist_type::UNIFORM>,
-                                      multiplicity))
-  .set_name("staic_multimap_retrieve_uniform_multiplicity")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_timeout(100)                            // Custom timeout: 100 s. Default is 15 s.
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", {0.8})
-  .add_float64_axis("MatchingRate", {0.5});
-
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_retrieve,
-                    NVBENCH_TYPE_AXES(key_type, value_type, d_type, nvbench::enum_type_list<8>))
-  .set_name("staic_multimap_retrieve_occupancy")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_timeout(100)                            // Custom timeout: 100 s. Default is 15 s.
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", nvbench::range(0.1, 0.9, 0.1))
-  .add_float64_axis("MatchingRate", {0.5});
-
-NVBENCH_BENCH_TYPES(nvbench_static_multimap_retrieve,
-                    NVBENCH_TYPE_AXES(key_type, value_type, d_type, nvbench::enum_type_list<8>))
-  .set_name("staic_multimap_retrieve_matching_rate")
-  .set_type_axes_names({"Key", "Value", "Distribution", "Multiplicity"})
-  .set_timeout(100)                            // Custom timeout: 100 s. Default is 15 s.
-  .set_max_noise(3)                            // Custom noise: 3%. By default: 0.5%.
-  .add_int64_axis("NumInputs", {100'000'000})  // Total number of key/value pairs: 100'000'000
-  .add_float64_axis("Occupancy", {0.8})
-  .add_float64_axis("MatchingRate", {0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1});
