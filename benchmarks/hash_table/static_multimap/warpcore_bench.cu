@@ -76,11 +76,12 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_insert(
 
   state.add_element_count(num_keys, "NumKeys");
 
-  hash_table_t hash_table(capacity);
-  hash_table.init();
-
   state.exec(
     nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch& launch, auto& timer) {
+      hash_table_t hash_table(capacity);
+      hash_table.init();
+      cudaDeviceSynchronize();
+
       // Use timers to explicitly mark the target region
       timer.start();
       hash_table.insert(d_keys.data().get(), d_values.data().get(), num_keys, launch.get_stream());
@@ -117,7 +118,7 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_count(
   auto const occupancy     = state.get_float64("Occupancy");
   auto const matching_rate = state.get_float64("MatchingRate");
 
-  std::size_t const size = num_keys / occupancy;
+  std::size_t const capacity = num_keys / occupancy;
 
   std::vector<Key> h_keys(num_keys);
 
@@ -126,10 +127,12 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_count(
   thrust::device_vector<Key> d_keys(h_keys);
   thrust::device_vector<Key> d_values(h_keys);
 
-  hash_table_t hash_table(size);
+  hash_table_t hash_table(capacity);
   hash_table.init();
+  cudaDeviceSynchronize();
 
   hash_table.insert(d_keys.data().get(), d_values.data().get(), num_keys);
+  cudaDeviceSynchronize();
 
   generate_prob_keys<Key>(matching_rate, h_keys.begin(), h_keys.end());
 
@@ -138,10 +141,10 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_count(
 
   state.add_element_count(num_keys, "NumKeys");
 
-  std::size_t value_size_out = 0;
-
   state.exec(nvbench::exec_tag::sync | nvbench::exec_tag::timer,
              [&](nvbench::launch& launch, auto& timer) {
+               std::size_t value_size_out = 0;
+
                timer.start();
                // nullptr to launch the dry-run count
                hash_table.retrieve(d_prob_keys.data().get(),
@@ -184,7 +187,7 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_retrieve
   auto const occupancy     = state.get_float64("Occupancy");
   auto const matching_rate = state.get_float64("MatchingRate");
 
-  std::size_t const size = num_keys / occupancy;
+  std::size_t const capacity = num_keys / occupancy;
 
   std::vector<Key> h_keys(num_keys);
 
@@ -193,10 +196,12 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_retrieve
   thrust::device_vector<Key> d_keys(h_keys);
   thrust::device_vector<Key> d_values(h_keys);
 
-  hash_table_t hash_table(size);
+  hash_table_t hash_table(capacity);
   hash_table.init();
+  cudaDeviceSynchronize();
 
   hash_table.insert(d_keys.data().get(), d_values.data().get(), num_keys);
+  cudaDeviceSynchronize();
 
   generate_prob_keys<Key>(matching_rate, h_keys.begin(), h_keys.end());
 
@@ -214,13 +219,14 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_retrieve
                       d_offsets.data().get() + 1,
                       nullptr,
                       value_size_out);
+  cudaDeviceSynchronize();
 
   thrust::device_vector<Value> d_results(value_size_out);
 
-  value_size_out = 0;
-
   state.exec(nvbench::exec_tag::sync | nvbench::exec_tag::timer,
              [&](nvbench::launch& launch, auto& timer) {
+               value_size_out = 0;
+
                timer.start();
                hash_table.retrieve(d_prob_keys.data().get(),
                                    num_keys,
@@ -241,8 +247,8 @@ std::enable_if_t<(sizeof(Key) != sizeof(Value)), void> nvbench_warpcore_retrieve
   state.skip("Key should be the same type as Value.");
 }
 
-using key_type   = nvbench::type_list<nvbench::uint32_t>;
-using value_type = nvbench::type_list<nvbench::uint32_t>;
+using key_type   = nvbench::type_list<nvbench::uint32_t, nvbench::uint64_t>;
+using value_type = nvbench::type_list<nvbench::uint32_t, nvbench::uint64_t>;
 using d_type =
   nvbench::enum_type_list<dist_type::GAUSSIAN, dist_type::GEOMETRIC, dist_type::UNIFORM>;
 
