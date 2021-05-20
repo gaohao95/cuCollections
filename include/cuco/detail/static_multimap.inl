@@ -37,7 +37,7 @@ static_multimap<Key, Value, CGSize, Scope, Allocator>::static_multimap(std::size
                                                                        Key empty_key_sentinel,
                                                                        Value empty_value_sentinel,
                                                                        Allocator const& alloc)
-  : capacity_{capacity},
+  : capacity_{cuco::detail::get_valid_capacity<CGSize>(capacity)},
     empty_key_sentinel_{empty_key_sentinel},
     empty_value_sentinel_{empty_value_sentinel},
     slot_allocator_{alloc}

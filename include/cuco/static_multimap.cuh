@@ -398,6 +398,7 @@ class static_multimap {
     template <typename CG, typename Hash>
     __device__ iterator initial_slot(CG g, Key const& k, Hash hash) noexcept
     {
+      step_size_ = (hash(k + 1) % (capacity_ / g.size() - 1) + 1) * g.size();
       return &slots_[(hash(k) + g.thread_rank()) % capacity_];
     }
 
@@ -416,6 +417,7 @@ class static_multimap {
     template <typename CG, typename Hash>
     __device__ const_iterator initial_slot(CG g, Key const& k, Hash hash) const noexcept
     {
+      step_size_ = (hash(k + 1) % (capacity_ / g.size() - 1) + 1) * g.size();
       return &slots_[(hash(k) + g.thread_rank()) % capacity_];
     }
 
@@ -457,7 +459,7 @@ class static_multimap {
     __device__ iterator next_slot(CG g, iterator s) noexcept
     {
       uint32_t index = s - slots_;
-      return &slots_[(index + g.size()) % capacity_];
+      return &slots_[(index + step_size_) % capacity_];
     }
 
     /**
@@ -475,7 +477,7 @@ class static_multimap {
     __device__ const_iterator next_slot(CG g, const_iterator s) const noexcept
     {
       uint32_t index = s - slots_;
-      return &slots_[(index + g.size()) % capacity_];
+      return &slots_[(index + step_size_) % capacity_];
     }
 
    public:
