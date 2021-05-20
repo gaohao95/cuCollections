@@ -705,8 +705,8 @@ class static_multimap {
       __device__ FancyIterator<data_type>& operator++()
       {
         current_ = next_slot(current_);
-        while (current_->first != key_) {
-          if (current_->first == this->empty_key_sentinel_) {
+        while (current_->first.load(cuda::std::memory_order_relaxed) != key_) {
+          if (current_->first.load(cuda::std::memory_order_relaxed) == this->empty_key_sentinel_) {
             current_ = this->end_;
             return *this;
           }

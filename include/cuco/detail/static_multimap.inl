@@ -252,7 +252,8 @@ __device__ void static_multimap<Key, Value, CGSize, Scope, Allocator>::device_mu
   auto current_slot = initial_slot(g, insert_pair.first, hash);
 
   while (true) {
-    key_type const existing_key = current_slot->first.load(cuda::memory_order_relaxed);
+    auto slot                   = reinterpret_cast<cuco::pair_type<Key, Value>*>(current_slot);
+    key_type const existing_key = slot->first;
 
     // The user provide `key_equal` can never be used to compare against `empty_key_sentinel` as the
     // sentinel is not a valid key value. Therefore, first check for the sentinel
@@ -585,7 +586,9 @@ __device__
   auto current_slot = initial_slot(g, k, hash);
 
   while (true) {
-    auto const existing_key = current_slot->first.load(cuda::std::memory_order_relaxed);
+    auto slot = reinterpret_cast<cuco::pair_type<Key, Value>*>(current_slot);
+
+    auto const existing_key = slot->first;
 
     // The user provide `key_equal` can never be used to compare against `empty_key_sentinel` as the
     // sentinel is not a valid key value. Therefore, first check for the sentinel
@@ -625,7 +628,9 @@ __device__
   auto current_slot = initial_slot(g, k, hash);
 
   while (true) {
-    auto const existing_key = current_slot->first.load(cuda::std::memory_order_relaxed);
+    auto slot = reinterpret_cast<cuco::pair_type<Key, Value>*>(current_slot);
+
+    auto const existing_key = slot->first;
 
     // The user provide `key_equal` can never be used to compare against `empty_key_sentinel` as the
     // sentinel is not a valid key value. Therefore, first check for the sentinel

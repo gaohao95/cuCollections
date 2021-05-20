@@ -553,13 +553,13 @@ __global__ void find_all(InputIt first,
     if (tile.thread_rank() == 0) {
       size_t count = 0;
       while (found != view.end()) {
-        size_t index            = (*num_items)++;
+        size_t index            = num_items->fetch_add(1, cuda::std::memory_order_relaxed);
         *(output_begin + index) = cuco::make_pair<Key, Value>(key, (*found).second);
         ++found;
         ++count;
       }
       if (count == 0) {
-        size_t index            = (*num_items)++;
+        size_t index            = num_items->fetch_add(1, cuda::std::memory_order_relaxed);
         *(output_begin + index) = cuco::make_pair<Key, Value>(key, view.get_empty_value_sentinel());
       }
     }
