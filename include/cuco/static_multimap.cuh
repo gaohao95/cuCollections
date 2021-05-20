@@ -398,11 +398,7 @@ class static_multimap {
     template <typename CG, typename Hash>
     __device__ iterator initial_slot(CG g, Key const& k, Hash hash) noexcept
     {
-      auto const cg_size = g.size();
-      step_size_         = (hash(k + 1) % (capacity_ / (cg_size * 2) - 1) + 1) * cg_size * 2;
-      auto const slot_index =
-        hash(k) % (capacity_ / (cg_size * 2)) * cg_size * 2 + g.thread_rank() * 2;
-      return begin_slot() + slot_index;
+      return &slots_[(hash(k) + g.thread_rank()) % capacity_];
     }
 
     /**
@@ -420,11 +416,7 @@ class static_multimap {
     template <typename CG, typename Hash>
     __device__ const_iterator initial_slot(CG g, Key const& k, Hash hash) const noexcept
     {
-      auto const cg_size = g.size();
-      step_size_         = (hash(k + 1) % (capacity_ / (cg_size * 2) - 1) + 1) * cg_size * 2;
-      auto const slot_index =
-        hash(k) % (capacity_ / (cg_size * 2)) * cg_size * 2 + g.thread_rank() * 2;
-      return begin_slot() + slot_index;
+      return &slots_[(hash(k) + g.thread_rank()) % capacity_];
     }
 
     /**
@@ -465,7 +457,7 @@ class static_multimap {
     __device__ iterator next_slot(CG g, iterator s) noexcept
     {
       uint32_t index = s - slots_;
-      return &slots_[(index + step_size_) % capacity_];
+      return &slots_[(index + g.size()) % capacity_];
     }
 
     /**
@@ -483,7 +475,7 @@ class static_multimap {
     __device__ const_iterator next_slot(CG g, const_iterator s) const noexcept
     {
       uint32_t index = s - slots_;
-      return &slots_[(index + step_size_) % capacity_];
+      return &slots_[(index + g.size()) % capacity_];
     }
 
    public:
@@ -679,6 +671,76 @@ class static_multimap {
     using mapped_type    = typename device_view_base::mapped_type;
     using iterator       = typename device_view_base::iterator;
     using const_iterator = typename device_view_base::const_iterator;
+
+    template <typename DataType>
+    struct FancyIterator {
+     public:
+      using data_type      = DataType;
+      using pointer_type   = DataType*;
+      using data_reference = DataType&;
+
+     public:
+      __host__ __device__ FancyIterator(pointer_type current, Key key, device_view& view) noexcept
+        : current_{current},
+          key_{key},
+          begin_{view.begin_slot()},
+          end_{view.end_slot()},
+          empty_key_sentinel_{view.get_empty_key_sentinel()}
+      {
+      }
+
+      __host__ __device__ FancyIterator(pointer_type current,
+                                        Key key,
+                                        const device_view& view) noexcept
+        : current_{current},
+          key_{key},
+          begin_{view.begin_slot()},
+          end_{view.end_slot()},
+          empty_key_sentinel_{view.get_empty_key_sentinel()}
+      {
+      }
+
+      __host__ __device__ ~FancyIterator() {}
+
+      __device__ FancyIterator<data_type>& operator++()
+      {
+        current_ = next_slot(current_);
+        while (current_->first != key_) {
+          if (current_->first == this->empty_key_sentinel_) {
+            current_ = this->end_;
+            return *this;
+          }
+          current_ = next_slot(current_);
+        }
+        return *this;
+      }
+
+      __device__ pointer_type next_slot(pointer_type it) noexcept
+      {
+        return (++it < end_) ? it : begin_;
+      }
+      __device__ pointer_type next_slot(pointer_type it) const noexcept
+      {
+        return (++it < end_) ? it : begin_;
+      }
+
+      __device__ bool operator==(const pointer_type& it) const { return (this->current_ == it); }
+      __device__ bool operator!=(const pointer_type& it) const { return this->current_ != it; }
+
+      __device__ data_reference operator*() { return *current_; }
+      __device__ data_reference operator*() const { return *current_; }
+      __device__ pointer_type operator->() { return current_; }
+      __device__ pointer_type operator->() const { return current_; }
+
+     private:
+      pointer_type current_;
+      Key key_;
+      pointer_type begin_;
+      pointer_type end_;
+      Key empty_key_sentinel_;
+    };
+    using fancy_iterator       = FancyIterator<pair_atomic_type>;
+    using const_fancy_iterator = FancyIterator<const pair_atomic_type>;
 
     /**
      * @brief Construct a view of the first `capacity` slots of the
@@ -984,6 +1046,60 @@ class static_multimap {
               typename KeyEqual = thrust::equal_to<key_type>>
     __device__ size_t
     count(CG g, Key const& k, Hash hash = Hash{}, KeyEqual key_equal = KeyEqual{}) const noexcept;
+
+    /**
+     * @brief Finds all values corresponding to the key `k`.
+     *
+     * Returns a fancy iterator to the first pair whose key is equivalent to `k`.
+     * If no such pair exists, returns `end()`. Uses the CUDA Cooperative Groups API to
+     * to leverage multiple threads to perform a single find. This provides a
+     * significant boost in throughput compared to the non Cooperative Group
+     * `find_all` at moderate to high load factors.
+     *
+     * @tparam CG Cooperative Group type
+     * @tparam Hash Unary callable type
+     * @tparam KeyEqual Binary callable type
+     * @param g The Cooperative Group used to perform the find
+     * @param k The key to search for
+     * @param hash The unary callable used to hash the key
+     * @param key_equal The binary callable used to compare two keys
+     * for equality
+     * @return A fancy iterator to the position at which the first key/value pair
+     * containing `k` was inserted
+     */
+    template <typename CG,
+              typename Hash     = cuco::detail::MurmurHash3_32<key_type>,
+              typename KeyEqual = thrust::equal_to<key_type>>
+    __device__ fancy_iterator
+    find_all(CG g, Key const& k, Hash hash = Hash{}, KeyEqual key_equal = KeyEqual{}) noexcept;
+
+    /**
+     * @brief Finds all values corresponding to the key `k`.
+     *
+     * Returns a const_iterator to the first pair whose key is equivalent to `k`.
+     * If no such pair exists, returns `end()`. Uses the CUDA Cooperative Groups API to
+     * to leverage multiple threads to perform a single find. This provides a
+     * significant boost in throughput compared to the non Cooperative Group
+     * `find_all` at moderate to high load factors.
+     *
+     * @tparam CG Cooperative Group type
+     * @tparam Hash Unary callable type
+     * @tparam KeyEqual Binary callable type
+     * @param g The Cooperative Group used to perform the find
+     * @param k The key to search for
+     * @param hash The unary callable used to hash the key
+     * @param key_equal The binary callable used to compare two keys
+     * for equality
+     * @return A const fancy iterator to the position at which the first key/value pair
+     * containing `k` was inserted
+     */
+    template <typename CG,
+              typename Hash     = cuco::detail::MurmurHash3_32<key_type>,
+              typename KeyEqual = thrust::equal_to<key_type>>
+    __device__ const_fancy_iterator find_all(CG g,
+                                             Key const& k,
+                                             Hash hash          = Hash{},
+                                             KeyEqual key_equal = KeyEqual{}) const noexcept;
   };  // class device_view
 
   /**

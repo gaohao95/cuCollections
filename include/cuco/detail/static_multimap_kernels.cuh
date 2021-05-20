@@ -155,12 +155,7 @@ __global__ void insert(InputIt first, InputIt last, viewT view, Hash hash, KeyEq
     // force conversion to value_type
     typename viewT::value_type const insert_pair{*it};
     view.insert(tile, insert_pair, hash, key_equal);
-    it += (gridDim.x * blockDim.x) / tile_size;
-  }
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    for (auto i = 0; i < view.get_capacity(); i++) {
-      auto slot = view.get_slots() + i;
-    }
+    it += (gridDim.x * block_size) / tile_size;
   }
 }
 
@@ -551,91 +546,24 @@ __global__ void find_all(InputIt first,
   auto tid     = block_size * blockIdx.x + threadIdx.x;
   auto key_idx = tid / tile_size;
 
-  const uint32_t lane_id = tile.thread_rank();
+  while (first + key_idx < last) {
+    auto key   = *(first + key_idx);
+    auto found = view.find_all(tile, key, hash, key_equal);
 
-  __shared__ uint32_t block_counter;
-  __shared__ cuco::pair_type<Key, Value> output_buffer[buffer_size];
-
-  if (0 == threadIdx.x) { block_counter = 0; }
-
-  while (__syncthreads_or(first + key_idx < last)) {
-    auto key = *(first + key_idx);
-    typename viewT::iterator current_slot;
-
-    bool running     = ((first + key_idx) < last);
-    bool found_match = false;
-
-    if (running) { current_slot = view.initial_slot(tile, key, hash); }
-
-    while (__syncthreads_or(running)) {
-      if (running) {
-        pair<Key, Value> arr[2];
-        if constexpr (sizeof(Key) == 4) {
-          auto const tmp = *reinterpret_cast<uint4 const*>(current_slot);
-          memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
-        } else {
-          auto const tmp = *reinterpret_cast<ulonglong4 const*>(current_slot);
-          memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
-        }
-
-        auto const first_slot_is_empty  = (arr[0].first == view.get_empty_key_sentinel());
-        auto const second_slot_is_empty = (arr[1].first == view.get_empty_key_sentinel());
-        auto const first_equals  = (not first_slot_is_empty and key_equal(arr[0].first, key));
-        auto const second_equals = (not second_slot_is_empty and key_equal(arr[1].first, key));
-        auto const first_exists  = tile.ballot(first_equals);
-        auto const second_exists = tile.ballot(second_equals);
-
-        if (first_exists or second_exists) {
-          found_match = true;
-
-          auto num_first_matches  = __popc(first_exists);
-          auto num_second_matches = __popc(second_exists);
-
-          uint32_t output_idx;
-          if (0 == lane_id) {
-            output_idx = atomicAdd_block(&block_counter, (num_first_matches + num_second_matches));
-          }
-          output_idx = tile.shfl(output_idx, 0);
-
-          if (first_equals) {
-            auto lane_offset = __popc(first_exists & ((1 << lane_id) - 1));
-            Key k            = key;
-            output_buffer[output_idx + lane_offset] =
-              cuco::make_pair<Key, Value>(std::move(k), std::move(arr[0].second));
-          }
-          if (second_equals) {
-            auto lane_offset = __popc(second_exists & ((1 << lane_id) - 1));
-            Key k            = key;
-            output_buffer[output_idx + num_first_matches + lane_offset] =
-              cuco::make_pair<Key, Value>(std::move(k), std::move(arr[1].second));
-          }
-        }
-        if (tile.any(first_slot_is_empty or second_slot_is_empty)) {
-          running = false;
-          if ((not found_match) && (lane_id == 0)) {
-            auto output_idx = atomicAdd_block(&block_counter, 1);
-            output_buffer[output_idx] =
-              cuco::make_pair<Key, Value>(key, view.get_empty_key_sentinel());
-          }
-        }
-      }  // if running
-
-      __syncthreads();
-
-      if ((block_counter + 2 * block_size) > buffer_size) {
-        flush_output_buffer<block_size>(block_counter, output_buffer, num_items, output_begin);
-
-        if (0 == threadIdx.x) { block_counter = 0; }
+    if (tile.thread_rank() == 0) {
+      size_t count = 0;
+      while (found != view.end()) {
+        size_t index            = (*num_items)++;
+        *(output_begin + index) = cuco::make_pair<Key, Value>(key, (*found).second);
+        ++found;
+        ++count;
       }
-
-      if (running) { current_slot = view.next_slot(tile, current_slot); }
-    }  // while running
+      if (count == 0) {
+        size_t index            = (*num_items)++;
+        *(output_begin + index) = cuco::make_pair<Key, Value>(key, view.get_empty_value_sentinel());
+      }
+    }
     key_idx += (gridDim.x * block_size) / tile_size;
-  }
-
-  // Final remainder flush
-  if (block_counter > 0) {
-    flush_output_buffer<block_size>(block_counter, output_buffer, num_items, output_begin);
   }
 }
 
@@ -725,30 +653,9 @@ __global__ void count(
   std::size_t thread_num_items = 0;
 
   while (first + key_idx < last) {
-    auto key          = *(first + key_idx);
-    auto current_slot = view.initial_slot(tile, key, hash);
-
-    while (true) {
-      pair<Key, Value> arr[2];
-      if constexpr (sizeof(Key) == 4) {
-        auto const tmp = *reinterpret_cast<uint4 const*>(current_slot);
-        memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
-      } else {
-        auto const tmp = *reinterpret_cast<ulonglong4 const*>(current_slot);
-        memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
-      }
-
-      auto const first_slot_is_empty  = (arr[0].first == view.get_empty_key_sentinel());
-      auto const second_slot_is_empty = (arr[1].first == view.get_empty_key_sentinel());
-      auto const first_equals         = (not first_slot_is_empty and key_equal(arr[0].first, key));
-      auto const second_equals        = (not second_slot_is_empty and key_equal(arr[1].first, key));
-
-      thread_num_items += (first_equals + second_equals);
-
-      if (tile.any(first_slot_is_empty or second_slot_is_empty)) { break; }
-
-      current_slot = view.next_slot(tile, current_slot);
-    }
+    auto it       = first + key_idx;
+    auto temp_num = view.count(tile, *it, hash, key_equal);
+    if (tile.thread_rank() == 0) { thread_num_items += temp_num; }
     key_idx += (gridDim.x * block_size) / tile_size;
   }
 
