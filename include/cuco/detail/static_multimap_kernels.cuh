@@ -546,24 +546,52 @@ __global__ void find_all(InputIt first,
   auto tid     = block_size * blockIdx.x + threadIdx.x;
   auto key_idx = tid / tile_size;
 
-  while (first + key_idx < last) {
-    auto key   = *(first + key_idx);
-    auto found = view.find_all(tile, key, hash, key_equal);
+  constexpr uint32_t step = 1;
 
-    if (tile.thread_rank() == 0) {
-      size_t count = 0;
-      while (found != view.end()) {
-        size_t index            = num_items->fetch_add(1, cuda::std::memory_order_relaxed);
-        *(output_begin + index) = cuco::make_pair<Key, Value>(key, (*found).second);
-        ++found;
-        ++count;
+  const int lane_id = tile.thread_rank();
+
+  while (first + key_idx < last) {
+    auto key          = *(first + key_idx);
+    auto current_slot = view.initial_slot(tile, key, hash);
+
+    bool running     = true;
+    bool found_match = false;
+
+    while (tile.any(running)) {
+      auto slot                = reinterpret_cast<cuco::pair_type<Key, Value>*>(current_slot);
+      auto const existing_key  = slot->first;
+      auto existing_value      = slot->second;
+      auto const slot_is_empty = (existing_key == view.get_empty_key_sentinel());
+      auto const equals        = key_equal(existing_key, key);
+      auto const exists        = tile.ballot(not slot_is_empty and equals);
+
+      if (exists) {
+        found_match      = true;
+        auto num_matches = __popc(exists);
+        uint32_t output_idx;
+        if (0 == lane_id) {
+          output_idx = num_items->fetch_add(num_matches, cuda::std::memory_order_relaxed);
+        }
+        output_idx = tile.shfl(output_idx, 0);
+        if (equals) {
+          auto lane_offset = __popc(exists & ((1 << lane_id) - 1));
+          Key k            = key;
+          *(output_begin + output_idx + lane_offset) =
+            cuco::make_pair<Key, Value>(std::move(k), std::move(existing_value));
+        }
+        if (tile.any(slot_is_empty)) {
+          running = false;
+          if ((not found_match) && (lane_id == 0)) {
+            auto output_idx = num_items->fetch_add(step, cuda::std::memory_order_relaxed);
+            *(output_begin + output_idx) =
+              cuco::make_pair<Key, Value>(key, view.get_empty_key_sentinel());
+          }
+        }
+        current_slot = view.next_slot(tile, current_slot);
       }
-      if (count == 0) {
-        size_t index            = num_items->fetch_add(1, cuda::std::memory_order_relaxed);
-        *(output_begin + index) = cuco::make_pair<Key, Value>(key, view.get_empty_value_sentinel());
-      }
+
+      key_idx += (gridDim.x * block_size) / tile_size;
     }
-    key_idx += (gridDim.x * block_size) / tile_size;
   }
 }
 
@@ -652,10 +680,29 @@ __global__ void count(
   __shared__ typename BlockReduce::TempStorage temp_storage;
   std::size_t thread_num_items = 0;
 
+  const int lane_id = tile.thread_rank();
+
   while (first + key_idx < last) {
-    auto it       = first + key_idx;
-    auto temp_num = view.count(tile, *it, hash, key_equal);
-    if (tile.thread_rank() == 0) { thread_num_items += temp_num; }
+    auto key          = *(first + key_idx);
+    auto current_slot = view.initial_slot(tile, key, hash);
+
+    bool running     = true;
+    bool found_match = false;
+
+    while (tile.any(running)) {
+      auto slot                = reinterpret_cast<cuco::pair_type<Key, Value>*>(current_slot);
+      auto const existing_key  = slot->first;
+      auto const slot_is_empty = (existing_key == view.get_empty_key_sentinel());
+      auto const equals        = key_equal(existing_key, key);
+
+      thread_num_items += equals;
+
+      if (tile.any(slot_is_empty)) {
+        running = false;
+        if ((not found_match) && (lane_id == 0)) { thread_num_items++; }
+      }
+      current_slot = view.next_slot(tile, current_slot);
+    }
     key_idx += (gridDim.x * block_size) / tile_size;
   }
 
