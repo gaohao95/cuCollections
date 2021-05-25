@@ -37,24 +37,21 @@ namespace cg = cooperative_groups;
  * @param num_items Size of the output sequence
  * @param output_begin Beginning of the output sequence of key/value pairs
  */
-template <uint32_t cg_size,
-          typename CG,
-          typename Key,
-          typename Value,
-          typename atomicT,
-          typename OutputIt>
-__inline__ __device__ void flush_output_buffer(CG const& g,
+template <typename Key, typename Value, typename atomicT, typename OutputIt>
+__inline__ __device__ void flush_output_buffer(const unsigned int activemask,
                                                uint32_t const num_outputs,
                                                cuco::pair_type<Key, Value>* output_buffer,
                                                atomicT* num_items,
                                                OutputIt output_begin)
 {
-  std::size_t offset;
-  const auto lane_id = g.thread_rank();
-  if (0 == lane_id) { offset = num_items->fetch_add(num_outputs, cuda::std::memory_order_relaxed); }
-  offset = g.shfl(offset, 0);
+  int num_threads = __popc(activemask);
 
-  for (auto index = lane_id; index < num_outputs; index += cg_size) {
+  std::size_t offset;
+  const auto lane_id = threadIdx.x % 32;
+  if (0 == lane_id) { offset = num_items->fetch_add(num_outputs, cuda::std::memory_order_relaxed); }
+  offset = __shfl_sync(activemask, offset, 0);
+
+  for (auto index = lane_id; index < num_outputs; index += num_threads) {
     *(output_begin + offset + index) = output_buffer[index];
   }
 }
@@ -551,14 +548,17 @@ __global__ void find_all(InputIt first,
   auto tid     = block_size * blockIdx.x + threadIdx.x;
   auto key_idx = tid / tile_size;
 
-  constexpr uint32_t num_cgs = block_size / tile_size;
-  const uint32_t cg_id       = threadIdx.x / tile_size;
-  const uint32_t lane_id     = tile.thread_rank();
+  constexpr uint32_t num_warps = block_size / 32;
+  const uint32_t warp_id       = threadIdx.x / 32;
+  const uint32_t warp_lane_id  = threadIdx.x % 32;
+  const uint32_t tile_lane_id  = tile.thread_rank();
 
-  __shared__ cuco::pair_type<Key, Value> output_buffer[num_cgs][buffer_size];
-  __shared__ uint32_t cg_counter[num_cgs];
+  __shared__ cuco::pair_type<Key, Value> output_buffer[num_warps][buffer_size];
+  __shared__ uint32_t warp_counter[num_warps];
 
-  if (lane_id == 0) { cg_counter[cg_id] = 0; }
+  if (warp_lane_id == 0) { warp_counter[warp_id] = 0; }
+
+  const unsigned int activemask = __ballot_sync(0xffffffff, first + key_idx < last);
 
   while (first + key_idx < last) {
     auto key          = *(first + key_idx);
@@ -567,70 +567,77 @@ __global__ void find_all(InputIt first,
     bool running     = true;
     bool found_match = false;
 
-    while (running) {
-      pair<Key, Value> arr[2];
-      if constexpr (sizeof(Key) == 4) {
-        auto const tmp = *reinterpret_cast<uint4 const*>(current_slot);
-        memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
-      } else {
-        auto const tmp = *reinterpret_cast<ulonglong4 const*>(current_slot);
-        memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
-      }
-
-      auto const first_slot_is_empty  = (arr[0].first == view.get_empty_key_sentinel());
-      auto const second_slot_is_empty = (arr[1].first == view.get_empty_key_sentinel());
-      auto const first_equals         = (not first_slot_is_empty and key_equal(arr[0].first, key));
-      auto const second_equals        = (not second_slot_is_empty and key_equal(arr[1].first, key));
-      auto const first_exists         = tile.ballot(first_equals);
-      auto const second_exists        = tile.ballot(second_equals);
-
-      if (first_exists or second_exists) {
-        found_match = true;
-
-        auto num_first_matches  = __popc(first_exists);
-        auto num_second_matches = __popc(second_exists);
-
-        uint32_t output_idx = cg_counter[cg_id];
-
-        if (first_equals) {
-          auto lane_offset = __popc(first_exists & ((1 << lane_id) - 1));
-          Key k            = key;
-          output_buffer[cg_id][output_idx + lane_offset] =
-            cuco::make_pair<Key, Value>(std::move(k), std::move(arr[0].second));
+    while (__any_sync(activemask, running)) {
+      if (running) {
+        pair<Key, Value> arr[2];
+        if constexpr (sizeof(Key) == 4) {
+          auto const tmp = *reinterpret_cast<uint4 const*>(current_slot);
+          memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
+        } else {
+          auto const tmp = *reinterpret_cast<ulonglong4 const*>(current_slot);
+          memcpy(&arr[0], &tmp, 2 * sizeof(pair<Key, Value>));
         }
-        if (second_equals) {
-          auto lane_offset = __popc(second_exists & ((1 << lane_id) - 1));
-          Key k            = key;
-          output_buffer[cg_id][output_idx + num_first_matches + lane_offset] =
-            cuco::make_pair<Key, Value>(std::move(k), std::move(arr[1].second));
-        }
-        if (0 == lane_id) { cg_counter[cg_id] += (num_first_matches + num_second_matches); }
-      }
-      if (tile.any(first_slot_is_empty or second_slot_is_empty)) {
-        running = false;
-        if ((not found_match) && (lane_id == 0)) {
-          auto output_idx = cg_counter[cg_id]++;
-          output_buffer[cg_id][output_idx] =
-            cuco::make_pair<Key, Value>(key, view.get_empty_key_sentinel());
-        }
-      }
 
-      tile.sync();
+        auto const first_slot_is_empty  = (arr[0].first == view.get_empty_key_sentinel());
+        auto const second_slot_is_empty = (arr[1].first == view.get_empty_key_sentinel());
+        auto const first_equals  = (not first_slot_is_empty and key_equal(arr[0].first, key));
+        auto const second_equals = (not second_slot_is_empty and key_equal(arr[1].first, key));
+        auto const first_exists  = tile.ballot(first_equals);
+        auto const second_exists = tile.ballot(second_equals);
 
-      flush_output_buffer<tile_size>(
-        tile, cg_counter[cg_id], output_buffer[cg_id], num_items, output_begin);
-      // First lane reset CG-level counter
-      if (lane_id == 0) { cg_counter[cg_id] = 0; }
+        if (first_exists or second_exists) {
+          found_match = true;
+
+          auto num_first_matches  = __popc(first_exists);
+          auto num_second_matches = __popc(second_exists);
+
+          uint32_t output_idx;
+          if (0 == tile_lane_id) {
+            output_idx =
+              atomicAdd(&warp_counter[warp_id], (num_first_matches + num_second_matches));
+          }
+          output_idx = tile.shfl(output_idx, 0);
+
+          if (first_equals) {
+            auto lane_offset = __popc(first_exists & ((1 << tile_lane_id) - 1));
+            Key k            = key;
+            output_buffer[warp_id][output_idx + lane_offset] =
+              cuco::make_pair<Key, Value>(std::move(k), std::move(arr[0].second));
+          }
+          if (second_equals) {
+            auto lane_offset = __popc(second_exists & ((1 << tile_lane_id) - 1));
+            Key k            = key;
+            output_buffer[warp_id][output_idx + num_first_matches + lane_offset] =
+              cuco::make_pair<Key, Value>(std::move(k), std::move(arr[1].second));
+          }
+        }
+        if (tile.any(first_slot_is_empty or second_slot_is_empty)) {
+          running = false;
+          if ((not found_match) && (tile_lane_id == 0)) {
+            auto output_idx = atomicAdd(&warp_counter[warp_id], 1);
+            output_buffer[warp_id][output_idx] =
+              cuco::make_pair<Key, Value>(key, view.get_empty_key_sentinel());
+          }
+        }
+      }  // if running
+
+      __syncwarp(activemask);
+      if (warp_counter[warp_id] + 32 * 2 > buffer_size) {
+        flush_output_buffer(
+          activemask, warp_counter[warp_id], output_buffer[warp_id], num_items, output_begin);
+        // First lane reset warp-level counter
+        if (warp_lane_id == 0) { warp_counter[warp_id] = 0; }
+      }
 
       current_slot = view.next_slot(tile, current_slot);
     }  // while running
-    key_idx += (gridDim.x * blockDim.x) / tile_size;
+    key_idx += (gridDim.x * block_size) / tile_size;
   }
 
   // Final flush of output buffer
-  if (cg_counter[cg_id] > 0) {
-    flush_output_buffer<tile_size>(
-      tile, cg_counter[cg_id], output_buffer[cg_id], num_items, output_begin);
+  if (warp_counter[warp_id] > 0) {
+    flush_output_buffer(
+      activemask, warp_counter[warp_id], output_buffer[warp_id], num_items, output_begin);
   }
 }
 
