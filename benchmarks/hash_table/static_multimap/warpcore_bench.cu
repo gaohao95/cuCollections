@@ -76,16 +76,19 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_insert(
 
   state.add_element_count(num_keys, "NumKeys");
 
+  hash_table_t hash_table(capacity);
+
   state.exec(
     nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch& launch, auto& timer) {
-      hash_table_t hash_table(capacity);
       hash_table.init();
-      cudaDeviceSynchronize();
 
       // Use timers to explicitly mark the target region
       timer.start();
       hash_table.insert(d_keys.data().get(), d_values.data().get(), num_keys, launch.get_stream());
       timer.stop();
+
+      auto status = hash_table.pop_status(launch.get_stream());
+      if (status.has_any_errors()) { std::cout << status << "\n"; }
     });
 }
 
@@ -128,11 +131,8 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_count(
   thrust::device_vector<Key> d_values(h_keys);
 
   hash_table_t hash_table(capacity);
-  hash_table.init();
-  cudaDeviceSynchronize();
 
   hash_table.insert(d_keys.data().get(), d_values.data().get(), num_keys);
-  cudaDeviceSynchronize();
 
   generate_prob_keys<Key>(matching_rate, h_keys.begin(), h_keys.end());
 
@@ -155,6 +155,9 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_count(
                                    value_size_out,
                                    launch.get_stream());
                timer.stop();
+
+               auto status = hash_table.pop_status(launch.get_stream());
+               if (status.has_any_errors()) { std::cout << status << "\n"; }
              });
 }
 
@@ -197,11 +200,8 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_retrieve
   thrust::device_vector<Key> d_values(h_keys);
 
   hash_table_t hash_table(capacity);
-  hash_table.init();
-  cudaDeviceSynchronize();
 
   hash_table.insert(d_keys.data().get(), d_values.data().get(), num_keys);
-  cudaDeviceSynchronize();
 
   generate_prob_keys<Key>(matching_rate, h_keys.begin(), h_keys.end());
 
@@ -236,6 +236,9 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_warpcore_retrieve
                                    value_size_out,
                                    launch.get_stream());
                timer.stop();
+
+               auto status = hash_table.pop_status(launch.get_stream());
+               if (status.has_any_errors()) { std::cout << status << "\n"; }
              });
 }
 
