@@ -311,6 +311,7 @@ __global__ void count(
  * @param pair_equal Binary function to compare two pairs for equality
  */
 template <uint32_t block_size,
+          uint32_t tile_size,
           typename InputIt,
           typename atomicT,
           typename viewT,
@@ -318,17 +319,18 @@ template <uint32_t block_size,
 __global__ void pair_count(
   InputIt first, InputIt last, atomicT* num_matches, viewT view, PairEqual pair_equal)
 {
-  auto tid = block_size * blockIdx.x + threadIdx.x;
-  auto it  = first + tid;
+  auto tile     = cg::tiled_partition<tile_size>(cg::this_thread_block());
+  auto tid      = block_size * blockIdx.x + threadIdx.x;
+  auto pair_idx = tid / tile_size;
 
   typedef cub::BlockReduce<std::size_t, block_size> BlockReduce;
   __shared__ typename BlockReduce::TempStorage temp_storage;
   std::size_t thread_num_matches = 0;
 
-  while (it < last) {
-    typename viewT::value_type const pair = *(it);
-    view.pair_count(pair, thrust::nullopt, thread_num_matches, pair_equal);
-    it += (gridDim.x * block_size);
+  while (first + pair_idx < last) {
+    typename viewT::value_type const pair = *(first + pair_idx);
+    view.pair_count(tile, pair, thread_num_matches, pair_equal);
+    pair_idx += (gridDim.x * block_size) / tile_size;
   }
 
   // compute number of successfully inserted elements for each block
@@ -360,6 +362,7 @@ __global__ void pair_count(
  */
 template <uint32_t block_size,
           uint32_t tile_size,
+          bool is_outer,
           typename InputIt,
           typename atomicT,
           typename viewT,
@@ -377,7 +380,11 @@ __global__ void pair_count(
 
   while (first + pair_idx < last) {
     typename viewT::value_type const pair = *(first + pair_idx);
-    view.pair_count(tile, pair, thread_num_matches, pair_equal);
+    if constexpr (is_outer) {
+      view.pair_count_outer(tile, pair, thrust::nullopt, thread_num_matches, pair_equal);
+    } else {
+      view.pair_count(tile, pair, thrust::nullopt, thread_num_matches, pair_equal);
+    }
     pair_idx += (gridDim.x * block_size) / tile_size;
   }
 
