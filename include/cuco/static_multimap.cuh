@@ -209,6 +209,8 @@ class static_multimap {
    */
   ~static_multimap();
 
+  void print();
+
   /**
    * @brief Inserts all key/value pairs in the range `[first, last)`.
    *
@@ -541,6 +543,21 @@ class static_multimap {
     /**
      * @brief Returns the initial slot for a given key `k`
      *
+     * @tparam Hash Unary callable type
+     * @param k The key to get the slot for
+     * @param hash The unary callable used to hash the key
+     * @return Pointer to the initial slot for `k`
+     */
+    template <typename Hash = cuco::detail::MurmurHash3_32<key_type>>
+    __device__ iterator initial_slot(Key const& k, Hash hash = Hash{}) noexcept
+    {
+      auto slot = get_slots();
+      return &slot[hash(k) % get_capacity()];
+    }
+
+    /**
+     * @brief Returns the initial slot for a given key `k`
+     *
      * To be used for Cooperative Group based probing.
      *
      * @tparam CG Cooperative Group type
@@ -777,6 +794,23 @@ class static_multimap {
       KeyEqual key_equal = KeyEqual{}) noexcept;
 
    public:
+    /**
+     * @brief Inserts the specified key/value pair into the map.
+     *
+     * @tparam KeyEqual Binary callable type
+     *
+     * @param insert_pair The pair to insert
+     * @param precomputed_hash Optional value which allows users to specify the precomputed hash
+     * value
+     * @param key_equal The binary callable used to compare two keys for
+     * equality
+     * @return void.
+     */
+    template <typename KeyEqual = thrust::equal_to<key_type>>
+    __device__ void insert(value_type const& insert_pair,
+                           optional_hash_type precomputed_hash,
+                           KeyEqual key_equal = KeyEqual{}) noexcept;
+
     /**
      * @brief Inserts the specified key/value pair into the map.
      *
@@ -1388,6 +1422,23 @@ class static_multimap {
     /**
      * @brief Counts the occurrence of a given key/value pair contained in multimap.
      *
+     * @tparam PairEqual Binary callable type
+     * @param pair The pair to search for
+     * @param precomputed_hash Optional value which allows users to specify the precomputed hash
+     * value
+     * @param thread_num_matches Number of matches found by the current thread
+     * @param pair_equal The binary callable used to compare two pairs
+     * for equality
+     */
+    template <typename PairEqual>
+    __device__ void pair_count(value_type const& pair,
+                               optional_hash_type precomputed_hash,
+                               std::size_t& thread_num_matches,
+                               PairEqual pair_equal) noexcept;
+
+    /**
+     * @brief Counts the occurrence of a given key/value pair contained in multimap.
+     *
      * @tparam CG Cooperative Group type
      * @tparam PairEqual Binary callable type
      * @param g The Cooperative Group used to perform the pair_count operation
@@ -1687,6 +1738,47 @@ class static_multimap {
                                         OutputZipIt1 probe_output_begin,
                                         OutputZipIt2 contained_output_begin,
                                         PairEqual pair_equal) noexcept;
+
+    /**
+     * @brief Find all the matches of a given pair contained in multimap.
+     *
+     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations in
+     * `[probe_output_begin, probe_output_end)` and copies slot[j] to unspecified locations in
+     * `[contained_output_begin, contained_output_end)`.
+     *
+     * @tparam cg_size The number of threads in CUDA Cooperative Groups
+     * @tparam buffer_size Size of the output buffer
+     * @tparam CG Cooperative Group type
+     * @tparam atomicT Type of atomic storage
+     * @tparam OutputZipIt1 Device accessible output zip iterator for probe matches
+     * @tparam OutputZipIt2 Device accessible output zip iterator for contained matches
+     * @tparam PairEqual Binary callable type
+     * @param g The Cooperative Group used to retrieve
+     * @param pair The pair to search for
+     * @param cg_counter Pointer to the CG counter
+     * @param probe_output_buffer Buffer of the matched probe pair sequence
+     * @param contained_output_buffer Buffer of the matched contained pair sequence
+     * @param num_matches Size of the output sequence
+     * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param pair_equal The binary callable used to compare two pairs for equality
+     */
+    template <uint32_t cg_size,
+              uint32_t buffer_size,
+              typename CG,
+              typename atomicT,
+              typename OutputZipIt1,
+              typename OutputZipIt2,
+              typename PairEqual>
+    __device__ void pair_retrieve(CG const& g,
+                                  value_type const& pair,
+                                  uint32_t* cg_counter,
+                                  value_type* probe_output_buffer,
+                                  value_type* contained_output_buffer,
+                                  atomicT* num_matches,
+                                  OutputZipIt1 probe_output_begin,
+                                  OutputZipIt2 contained_output_begin,
+                                  PairEqual pair_equal) noexcept;
 
     /**
      * @brief Find all the matches of a given pair contained in multimap using scalar

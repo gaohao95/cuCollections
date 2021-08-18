@@ -23,6 +23,20 @@ namespace cuco {
 namespace detail {
 namespace cg = cooperative_groups;
 
+template <typename pair_atomic_type>
+__global__ void print(pair_atomic_type* const slots, std::size_t size)
+{
+  auto tid = threadIdx.x + blockIdx.x * blockDim.x;
+  if (0 == tid) {
+    for (int i = 0; i < size; i++) {
+      auto key   = slots[i].first.load();
+      auto value = slots[i].second.load();
+      printf("%ld\t%ld\n", long(key), long(value));
+    }
+    printf("### end of print\n\n");
+  }
+}
+
 /**
  * @brief Initializes each slot in the flat `slots` storage to contain `k` and `v`.
  *
@@ -89,6 +103,41 @@ __global__ void insert(InputIt first, InputIt last, viewT view, KeyEqual key_equ
     typename viewT::value_type const insert_pair{*it};
     view.insert(tile, insert_pair, thrust::nullopt, key_equal);
     it += (gridDim.x * block_size) / tile_size;
+  }
+}
+
+/**
+ * @brief Inserts key/value pairs in the range `[first, last)` if `pred` returns true.
+ *
+ * @tparam block_size The size of the thread block
+ * @tparam InputIt Device accessible input iterator whose `value_type` is
+ * convertible to the map's `value_type`
+ * @tparam viewT Type of device view allowing access of hash map storage
+ * @tparam Predicate Unary predicate function type
+ * @tparam KeyEqual Binary callable type
+ * @param first Beginning of the sequence of key/value pairs
+ * @param last End of the sequence of key/value pairs
+ * @param view Mutable device view used to access the hash map's slot storage
+ * @param key_equal The binary function used to compare two keys for equality
+ */
+template <uint32_t block_size,
+          typename InputIt,
+          typename viewT,
+          typename Predicate,
+          typename KeyEqual>
+__global__ void insert_if(
+  InputIt first, InputIt last, viewT view, Predicate pred, KeyEqual key_equal)
+{
+  auto tid = block_size * blockIdx.x + threadIdx.x;
+  auto it  = first + tid;
+
+  while (it < last) {
+    typename viewT::value_type const insert_pair{*it};
+    if (pred(insert_pair)) {
+      // force conversion to value_type
+      view.insert(insert_pair, thrust::nullopt, key_equal);
+    }
+    it += (gridDim.x * block_size);
   }
 }
 
@@ -237,6 +286,49 @@ __global__ void count(
       view.count(tile, key, thrust::nullopt, thread_num_matches, key_equal);
     }
     key_idx += (gridDim.x * block_size) / tile_size;
+  }
+
+  // compute number of successfully inserted elements for each block
+  // and atomically add to the grand total
+  std::size_t block_num_matches = BlockReduce(temp_storage).Sum(thread_num_matches);
+  if (threadIdx.x == 0) {
+    num_matches->fetch_add(block_num_matches, cuda::std::memory_order_relaxed);
+  }
+}
+
+/**
+ * @brief Counts the occurrences of key/value pairs in `[first, last)` contained in the multimap.
+ *
+ * @tparam block_size The size of the thread block
+ * @tparam Input Device accesible input iterator of key/value pairs
+ * @tparam atomicT Type of atomic storage
+ * @tparam viewT Type of device view allowing access of hash map storage
+ * @tparam PairEqual Binary callable
+ * @param first Beginning of the sequence of pairs to count
+ * @param last End of the sequence of pairs to count
+ * @param num_matches The number of all the matches for a sequence of pairs
+ * @param view Device view used to access the hash map's slot storage
+ * @param pair_equal Binary function to compare two pairs for equality
+ */
+template <uint32_t block_size,
+          typename InputIt,
+          typename atomicT,
+          typename viewT,
+          typename PairEqual>
+__global__ void pair_count(
+  InputIt first, InputIt last, atomicT* num_matches, viewT view, PairEqual pair_equal)
+{
+  auto tid = block_size * blockIdx.x + threadIdx.x;
+  auto it  = first + tid;
+
+  typedef cub::BlockReduce<std::size_t, block_size> BlockReduce;
+  __shared__ typename BlockReduce::TempStorage temp_storage;
+  std::size_t thread_num_matches = 0;
+
+  while (it < last) {
+    typename viewT::value_type const pair = *(it);
+    view.pair_count(pair, thrust::nullopt, thread_num_matches, pair_equal);
+    it += (gridDim.x * block_size);
   }
 
   // compute number of successfully inserted elements for each block
@@ -496,6 +588,71 @@ __global__ void retrieve(InputIt first,
   if (cg_counter[cg_id] > 0) {
     view.flush_output_buffer(
       tile, cg_counter[cg_id], output_buffer[cg_id], num_matches, output_begin);
+  }
+}
+
+template <uint32_t block_size,
+          uint32_t warp_size,
+          uint32_t buffer_size,
+          typename InputIt,
+          typename OutputIt1,
+          typename OutputIt2,
+          typename atomicT,
+          typename viewT,
+          typename PairEqual>
+__global__ void pair_retrieve(InputIt first,
+                              InputIt last,
+                              OutputIt1 probe_output_begin,
+                              OutputIt2 contained_output_begin,
+                              atomicT* num_matches,
+                              viewT view,
+                              PairEqual pair_equal)
+{
+  using pair_type = typename viewT::value_type;
+
+  constexpr uint32_t num_warps = block_size / warp_size;
+  const uint32_t warp_id       = threadIdx.x / warp_size;
+
+  auto warp = cg::tiled_partition<warp_size>(cg::this_thread_block());
+  auto tid  = block_size * blockIdx.x + threadIdx.x;
+  auto it   = first + tid;
+
+  __shared__ pair_type probe_output_buffer[num_warps][buffer_size];
+  __shared__ pair_type contained_output_buffer[num_warps][buffer_size];
+  // TODO: replace this with shared memory cuda::atomic variables once the dynamiic initialization
+  // warning issue is solved __shared__ atomicT toto_countter[num_warps];
+  __shared__ uint32_t warp_counter[num_warps];
+
+  if (warp.thread_rank() == 0) { warp_counter[warp_id] = 0; }
+
+  while (warp.any(it < last)) {
+    bool active_flag = it < last;
+    auto active_warp = cg::binary_partition<warp_size>(warp, active_flag);
+
+    if (active_flag) {
+      pair_type pair = *(it);
+      view.pair_retrieve<warp_size, buffer_size>(active_warp,
+                                                 pair,
+                                                 &warp_counter[warp_id],
+                                                 probe_output_buffer[warp_id],
+                                                 contained_output_buffer[warp_id],
+                                                 num_matches,
+                                                 probe_output_begin,
+                                                 contained_output_begin,
+                                                 pair_equal);
+    }
+    it += (gridDim.x * block_size);
+  }
+
+  // Final flush of output buffer
+  if (warp_counter[warp_id] > 0) {
+    view.flush_output_buffer(warp,
+                             warp_counter[warp_id],
+                             probe_output_buffer[warp_id],
+                             contained_output_buffer[warp_id],
+                             num_matches,
+                             probe_output_begin,
+                             contained_output_begin);
   }
 }
 
