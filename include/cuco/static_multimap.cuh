@@ -125,7 +125,7 @@ namespace cuco {
  */
 template <typename Key,
           typename Value,
-          class ProbeSequence      = cuco::double_hashing<Key, Value>,
+          class ProbeSequence      = cuco::linear_probing<Key, Value>,
           cuda::thread_scope Scope = cuda::thread_scope_device,
           typename Allocator       = cuco::cuda_allocator<char>>
 class static_multimap {
@@ -548,11 +548,10 @@ class static_multimap {
      * @param hash The unary callable used to hash the key
      * @return Pointer to the initial slot for `k`
      */
-    template <typename Hash = cuco::detail::MurmurHash3_32<key_type>>
-    __device__ iterator initial_slot(Key const& k, Hash hash = Hash{}) noexcept
+    template <typename CG, typename Hash = cuco::detail::MurmurHash3_32<key_type>>
+    __device__ iterator initial_slot(CG const& g, Key const& k, Hash hash = Hash{}) noexcept
     {
-      auto slot = get_slots();
-      return &slot[hash(k) % get_capacity()];
+      return probe_sequence_.initial_slot(g, k);
     }
 
     /**
@@ -570,7 +569,7 @@ class static_multimap {
                                      Key const& k,
                                      optional_hash_type precomputed_hash) noexcept
     {
-      return probe_sequence_.initial_slot(g, k, precomputed_hash);
+      return probe_sequence_.initial_slot(g, k);
     }
 
     /**
@@ -806,9 +805,9 @@ class static_multimap {
      * equality
      * @return void.
      */
-    template <typename KeyEqual = thrust::equal_to<key_type>>
-    __device__ void insert(value_type const& insert_pair,
-                           optional_hash_type precomputed_hash,
+    template <typename CG, typename KeyEqual = thrust::equal_to<key_type>>
+    __device__ void insert(CG g,
+                           value_type const& insert_pair,
                            KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
@@ -1430,9 +1429,9 @@ class static_multimap {
      * @param pair_equal The binary callable used to compare two pairs
      * for equality
      */
-    template <typename PairEqual>
-    __device__ void pair_count(value_type const& pair,
-                               optional_hash_type precomputed_hash,
+    template <typename CG, typename PairEqual>
+    __device__ void pair_count(CG g,
+                               value_type const& pair,
                                std::size_t& thread_num_matches,
                                PairEqual pair_equal) noexcept;
 
@@ -1763,14 +1762,15 @@ class static_multimap {
      * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
      * @param pair_equal The binary callable used to compare two pairs for equality
      */
-    template <uint32_t cg_size,
-              uint32_t buffer_size,
+    template <uint32_t buffer_size,
+              typename warpT,
               typename CG,
               typename atomicT,
               typename OutputZipIt1,
               typename OutputZipIt2,
               typename PairEqual>
-    __device__ void pair_retrieve(CG const& g,
+    __device__ void pair_retrieve(warpT const& warp,
+                                  CG const& g,
                                   value_type const& pair,
                                   uint32_t* cg_counter,
                                   value_type* probe_output_buffer,

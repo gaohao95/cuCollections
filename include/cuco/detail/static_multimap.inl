@@ -104,10 +104,10 @@ void static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::insert_if(
   auto num_keys         = std::distance(first, last);
   auto const block_size = 128;
   auto const stride     = 1;
-  auto const grid_size  = (num_keys + stride * block_size - 1) / (stride * block_size);
+  auto const grid_size  = (cg_size() * num_keys + stride * block_size - 1) / (stride * block_size);
   auto view             = get_device_mutable_view();
 
-  detail::insert_if<block_size>
+  detail::insert_if<block_size, cg_size()>
     <<<grid_size, block_size, 0, stream>>>(first, first + num_keys, view, pred, key_equal);
   CUCO_CUDA_TRY(cudaStreamSynchronize(stream));
 }
@@ -202,13 +202,13 @@ std::size_t static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::pair_c
   auto num_keys         = std::distance(first, last);
   auto const block_size = 128;
   auto const stride     = 1;
-  auto const grid_size  = (num_keys + stride * block_size - 1) / (stride * block_size);
+  auto const grid_size  = (cg_size() * num_keys + stride * block_size - 1) / (stride * block_size);
   auto view             = get_device_view();
 
   cudaMemsetAsync(d_counter_, 0, sizeof(atomic_ctr_type), stream);
   std::size_t h_counter;
 
-  detail::pair_count<block_size>
+  detail::pair_count<block_size, cg_size()>
     <<<grid_size, block_size, 0, stream>>>(first, last, d_counter_, view, pair_equal);
   CUCO_CUDA_TRY(cudaMemcpyAsync(
     &h_counter, d_counter_, sizeof(atomic_ctr_type), cudaMemcpyDeviceToHost, stream));
@@ -343,14 +343,15 @@ std::size_t static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::pair_r
   // Using per-warp buffer for vector loads and per-CG buffer for scalar loads
   auto const buffer_size = (warp_size() * 3u);
   auto const stride      = 1;
-  auto const grid_size   = (num_pairs + stride * block_size - 1) / (stride * block_size);
-  auto view              = get_device_view();
+  auto const grid_size = (cg_size() * num_pairs + stride * block_size - 1) / (stride * block_size);
+  auto view            = get_device_view();
 
   cudaMemsetAsync(d_counter_, 0, sizeof(atomic_ctr_type), stream);
   std::size_t h_counter;
 
-  detail::pair_retrieve<block_size, warp_size(), buffer_size><<<grid_size, block_size, 0, stream>>>(
-    first, last, probe_output_begin, contained_output_begin, d_counter_, view, pair_equal);
+  detail::pair_retrieve<block_size, warp_size(), cg_size(), buffer_size>
+    <<<grid_size, block_size, 0, stream>>>(
+      first, last, probe_output_begin, contained_output_begin, d_counter_, view, pair_equal);
 
   CUCO_CUDA_TRY(cudaMemcpyAsync(
     &h_counter, d_counter_, sizeof(atomic_ctr_type), cudaMemcpyDeviceToHost, stream));
@@ -627,12 +628,12 @@ template <typename Key,
           class ProbeSequence,
           cuda::thread_scope Scope,
           typename Allocator>
-template <typename KeyEqual>
+template <typename CG, typename KeyEqual>
 __device__ void
 static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_mutable_view::insert(
-  value_type const& insert_pair, optional_hash_type precomputed_hash, KeyEqual key_equal) noexcept
+  CG g, value_type const& insert_pair, KeyEqual key_equal) noexcept
 {
-  auto current_slot = initial_slot(insert_pair.first);
+  auto current_slot = initial_slot(g, insert_pair.first);
 
   while (true) {
     key_type const existing_key = current_slot->first.load(cuda::memory_order_relaxed);
@@ -641,15 +642,19 @@ static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_mutable_vie
     // sentinel is not a valid key value. Therefore, first check for the sentinel
     auto const slot_is_empty =
       detail::bitwise_compare(existing_key, this->get_empty_key_sentinel());
+    auto const window_contains_empty = g.ballot(slot_is_empty);
 
-    if (slot_is_empty) {
+    if (window_contains_empty) {
       // the first lane in the group with an empty slot will attempt the insert
       insert_result status{insert_result::CONTINUE};
+      uint32_t src_lane = __ffs(window_contains_empty) - 1;
 
-      status = back_to_back_cas(current_slot, insert_pair, key_equal);
+      if (g.thread_rank() == src_lane) {
+        status = packed_cas(current_slot, insert_pair, key_equal);
+      }
 
       // successful insert
-      if (status == insert_result::SUCCESS) { return; }
+      if (g.any(status == insert_result::SUCCESS)) { return; }
       // if we've gotten this far, a different key took our spot
       // before we could insert. We need to retry the insert on the
       // same window
@@ -657,9 +662,7 @@ static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_mutable_vie
     // if there are no empty slots in the current window,
     // we move onto the next window
     else {
-      auto slot         = this->get_slots();
-      std::size_t index = current_slot - slot;
-      current_slot      = &slot[(index + 1) % this->get_capacity()];
+      current_slot = next_slot(current_slot);
     }
   }  // while true
 }
@@ -1443,16 +1446,13 @@ template <typename Key,
           class ProbeSequence,
           cuda::thread_scope Scope,
           typename Allocator>
-template <typename PairEqual>
+template <typename CG, typename PairEqual>
 __device__ void
 static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_view::pair_count(
-  value_type const& pair,
-  optional_hash_type precomputed_hash,
-  std::size_t& thread_num_matches,
-  PairEqual pair_equal) noexcept
+  CG g, value_type const& pair, std::size_t& thread_num_matches, PairEqual pair_equal) noexcept
 {
   auto key          = pair.first;
-  auto current_slot = initial_slot(key);
+  auto current_slot = initial_slot(g, key);
 
   while (true) {
     auto slot_contents = *reinterpret_cast<cuco::pair_type<Key, Value> const*>(current_slot);
@@ -1464,11 +1464,9 @@ static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_view::pair_
 
     thread_num_matches += equals;
 
-    if (slot_is_empty) { break; }
+    if (g.any(slot_is_empty)) { break; }
 
-    auto slot         = this->get_slots();
-    std::size_t index = current_slot - slot;
-    current_slot      = &slot[(index + 1) % this->get_capacity()];
+    current_slot = next_slot(current_slot);
   }
 }
 
@@ -1703,8 +1701,8 @@ template <typename Key,
           class ProbeSequence,
           cuda::thread_scope Scope,
           typename Allocator>
-template <uint32_t cg_size,
-          uint32_t buffer_size,
+template <uint32_t buffer_size,
+          typename warpT,
           typename CG,
           typename atomicT,
           typename OutputZipIt1,
@@ -1712,9 +1710,10 @@ template <uint32_t cg_size,
           typename PairEqual>
 __device__ void
 static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_view::pair_retrieve(
+  warpT const& warp,
   CG const& g,
   value_type const& pair,
-  uint32_t* cg_counter,
+  uint32_t* warp_counter,
   value_type* probe_output_buffer,
   value_type* contained_output_buffer,
   atomicT* num_matches,
@@ -1723,42 +1722,46 @@ static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_view::pair_
   PairEqual pair_equal) noexcept
 {
   auto key          = pair.first;
-  auto current_slot = initial_slot(key);
+  auto current_slot = initial_slot(g, key);
 
   bool running = true;
 
-  while (g.any(running)) {
+  while (warp.any(running)) {
     if (running) {
       auto slot_contents = *reinterpret_cast<cuco::pair_type<Key, Value> const*>(current_slot);
 
       auto const slot_is_empty =
         detail::bitwise_compare(slot_contents.first, this->get_empty_key_sentinel());
+      auto const equals = (not slot_is_empty and pair_equal(slot_contents, pair));
+      auto const exists = g.ballot(equals);
 
-      if (slot_is_empty) {
-        running = false;
-      } else if (pair_equal(slot_contents, pair)) {
-        auto output_idx                     = atomicAdd(cg_counter, 1);
-        probe_output_buffer[output_idx]     = pair;
-        contained_output_buffer[output_idx] = slot_contents;
+      if (exists) {
+        auto num_matches = __popc(exists);
+        uint32_t output_idx;
+        if (0 == g.thread_rank()) { output_idx = atomicAdd(warp_counter, (num_matches)); }
+        output_idx = g.shfl(output_idx, 0);
+        if (equals) {
+          auto lane_offset = __popc(exists & ((1 << g.thread_rank()) - 1));
+          probe_output_buffer[output_idx + lane_offset]     = pair;
+          contained_output_buffer[output_idx + lane_offset] = slot_contents;
+        }
       }
+      if (g.any(slot_is_empty)) { running = false; }
     }  // if running
 
-    g.sync();
-    if (*cg_counter + g.size() > buffer_size) {
-      flush_output_buffer(g,
-                          *cg_counter,
+    warp.sync();
+    if (*warp_counter + warp.size() > buffer_size) {
+      flush_output_buffer(warp,
+                          *warp_counter,
                           probe_output_buffer,
                           contained_output_buffer,
                           num_matches,
                           probe_output_begin,
                           contained_output_begin);
       // First lane reset warp-level counter
-      if (g.thread_rank() == 0) { *cg_counter = 0; }
+      if (warp.thread_rank() == 0) { *warp_counter = 0; }
     }
-
-    auto slot         = this->get_slots();
-    std::size_t index = current_slot - slot;
-    current_slot      = &slot[(index + 1) % this->get_capacity()];
+    current_slot = next_slot(current_slot);
   }  // while running
 }
 

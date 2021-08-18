@@ -178,7 +178,7 @@ __global__ void insert_if(
     typename viewT::value_type const insert_pair{*it};
     if (pred(insert_pair)) {
       // force conversion to value_type
-      view.insert(tile, insert_pair, thrust::nullopt, key_equal);
+      view.insert(tile, insert_pair, key_equal);
     }
     it += (gridDim.x * block_size) / tile_size;
   }
@@ -360,7 +360,6 @@ __global__ void pair_count(
  */
 template <uint32_t block_size,
           uint32_t tile_size,
-          bool is_outer,
           typename InputIt,
           typename atomicT,
           typename viewT,
@@ -378,11 +377,7 @@ __global__ void pair_count(
 
   while (first + pair_idx < last) {
     typename viewT::value_type const pair = *(first + pair_idx);
-    if constexpr (is_outer) {
-      view.pair_count_outer(tile, pair, thrust::nullopt, thread_num_matches, pair_equal);
-    } else {
-      view.pair_count(tile, pair, thrust::nullopt, thread_num_matches, pair_equal);
-    }
+    view.pair_count(tile, pair, thread_num_matches, pair_equal);
     pair_idx += (gridDim.x * block_size) / tile_size;
   }
 
@@ -593,6 +588,7 @@ __global__ void retrieve(InputIt first,
 
 template <uint32_t block_size,
           uint32_t warp_size,
+          uint32_t cg_size,
           uint32_t buffer_size,
           typename InputIt,
           typename OutputIt1,
@@ -614,8 +610,9 @@ __global__ void pair_retrieve(InputIt first,
   const uint32_t warp_id       = threadIdx.x / warp_size;
 
   auto warp = cg::tiled_partition<warp_size>(cg::this_thread_block());
+  auto tile = cg::tiled_partition<cg_size>(cg::this_thread_block());
   auto tid  = block_size * blockIdx.x + threadIdx.x;
-  auto it   = first + tid;
+  auto it   = first + tid / cg_size;
 
   __shared__ pair_type probe_output_buffer[num_warps][buffer_size];
   __shared__ pair_type contained_output_buffer[num_warps][buffer_size];
@@ -631,17 +628,18 @@ __global__ void pair_retrieve(InputIt first,
 
     if (active_flag) {
       pair_type pair = *(it);
-      view.pair_retrieve<warp_size, buffer_size>(active_warp,
-                                                 pair,
-                                                 &warp_counter[warp_id],
-                                                 probe_output_buffer[warp_id],
-                                                 contained_output_buffer[warp_id],
-                                                 num_matches,
-                                                 probe_output_begin,
-                                                 contained_output_begin,
-                                                 pair_equal);
+      view.pair_retrieve<buffer_size>(active_warp,
+                                      tile,
+                                      pair,
+                                      &warp_counter[warp_id],
+                                      probe_output_buffer[warp_id],
+                                      contained_output_buffer[warp_id],
+                                      num_matches,
+                                      probe_output_begin,
+                                      contained_output_begin,
+                                      pair_equal);
     }
-    it += (gridDim.x * block_size);
+    it += (gridDim.x * block_size) / cg_size;
   }
 
   // Final flush of output buffer
