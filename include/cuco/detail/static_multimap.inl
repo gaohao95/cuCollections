@@ -1698,6 +1698,60 @@ template <typename Key,
           class ProbeSequence,
           cuda::thread_scope Scope,
           typename Allocator>
+template <typename CG,
+          typename KeyEqual>
+__device__ void static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::device_view::retrieve(
+  CG const& g,
+  Key const& k,
+  uint32_t* cg_counter,
+  Key *output_keys,
+  Value *output_values,
+  KeyEqual key_equal) noexcept
+{
+  const uint32_t lane_id = g.thread_rank();
+
+  auto current_slot = initial_slot(g, k);
+
+  bool running                      = true;
+
+  while (running) {
+    // TODO: Replace reinterpret_cast with atomic ref when possible. The current implementation
+    // is unsafe!
+    static_assert(sizeof(Key) == sizeof(cuda::atomic<Key>));
+    static_assert(sizeof(Value) == sizeof(cuda::atomic<Value>));
+    pair<Key, Value> slot_contents = *reinterpret_cast<pair<Key, Value> const*>(current_slot);
+
+    auto const slot_is_empty =
+      detail::bitwise_compare(slot_contents.first, this->get_empty_key_sentinel());
+    auto const equals = (not slot_is_empty and key_equal(slot_contents.first, k));
+    auto const exists = g.ballot(equals);
+
+    if (exists) {
+      auto num_matches    = __popc(exists);
+      uint32_t output_idx = *cg_counter;
+      if (equals) {
+        // Each match computes its lane-level offset
+        auto lane_offset = __popc(exists & ((1 << lane_id) - 1));
+        output_keys[output_idx + lane_offset] = k;
+        output_values[output_idx + lane_offset] = slot_contents.second;
+      }
+      if (0 == lane_id) { *cg_counter += num_matches; }
+    }
+    if (g.any(slot_is_empty)) {
+      running = false;
+    }
+
+    g.sync();
+
+    current_slot = next_slot(current_slot);
+  }  // while running
+}
+
+template <typename Key,
+          typename Value,
+          class ProbeSequence,
+          cuda::thread_scope Scope,
+          typename Allocator>
 template <uint32_t cg_size,
           uint32_t buffer_size,
           typename CG,

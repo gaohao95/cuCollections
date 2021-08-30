@@ -454,7 +454,10 @@ class static_multimap {
    *
    * @return Boolean indicating if vector load is used.
    */
-  static constexpr bool uses_vector_load() noexcept { return ProbeSequence::uses_vector_load(); }
+  static constexpr bool uses_vector_load() noexcept {
+    // return ProbeSequence::uses_vector_load();
+    return false;
+  }
 
   /**
    * @brief The number of elements for each vector load
@@ -1438,6 +1441,18 @@ class static_multimap {
                              value_type* output_buffer,
                              atomicT* num_matches,
                              OutputIt output_begin,
+                             KeyEqual key_equal = KeyEqual{}) noexcept;
+
+    /**
+     * @brief Updated retrieve implementation.
+     */
+    template <typename CG,
+              typename KeyEqual = thrust::equal_to<key_type>>
+    __device__ void retrieve(CG const& g,
+                             Key const& k,
+                             uint32_t* cg_counter,
+                             Key *output_keys,
+                             Value *output_values,
                              KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
