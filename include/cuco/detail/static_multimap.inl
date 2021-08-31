@@ -1704,7 +1704,6 @@ __device__ void static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::de
   CG const& g,
   Key const& k,
   uint32_t* cg_counter,
-  Key *output_keys,
   Value *output_values,
   KeyEqual key_equal) noexcept
 {
@@ -1732,7 +1731,6 @@ __device__ void static_multimap<Key, Value, ProbeSequence, Scope, Allocator>::de
       if (equals) {
         // Each match computes its lane-level offset
         auto lane_offset = __popc(exists & ((1 << lane_id) - 1));
-        output_keys[output_idx + lane_offset] = k;
         output_values[output_idx + lane_offset] = slot_contents.second;
       }
       if (0 == lane_id) { *cg_counter += num_matches; }

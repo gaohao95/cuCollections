@@ -1451,7 +1451,6 @@ class static_multimap {
     __device__ void retrieve(CG const& g,
                              Key const& k,
                              uint32_t* cg_counter,
-                             Key *output_keys,
                              Value *output_values,
                              KeyEqual key_equal = KeyEqual{}) noexcept;
 
