@@ -45,7 +45,8 @@ class probe_sequence_base {
 
   __host__ __device__ static constexpr bool uses_vector_load() noexcept
   {
-    return cuco::detail::is_packable<value_type>();
+    return false;
+    // return cuco::detail::is_packable<value_type>();
   }
 
   __host__ __device__ explicit probe_sequence_base(iterator slots, std::size_t capacity)
